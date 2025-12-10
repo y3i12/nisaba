@@ -1,0 +1,94 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": ".nisaba/scripts/workspace-status",
+    "padding": 0
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".nisaba/scripts/precompact_extract"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Glob",
+      "Grep",
+      "mcp__ide__executeCode",
+      "mcp__ide__getDiagnostics",
+      "mcp__nabu__activate_codebase",
+      "mcp__nabu__check_impact",
+      "mcp__nabu__file_windows",
+      "mcp__nabu__find_clones",
+      "mcp__nabu__get_frame_skeleton",
+      "mcp__nabu__list_codebases",
+      "mcp__nabu__map_codebase",
+      "mcp__nabu__query_relationships",
+      "mcp__nabu__rebuild_database",
+      "mcp__nabu__search",
+      "mcp__nabu__show_status",
+      "mcp__nabu__show_structure",
+      "mcp__nabu__structural_view",
+      "mcp__nisaba__augment",
+      "mcp__nisaba__todo",
+      "mcp__serena__activate_project",
+      "mcp__serena__check_onboarding_performed",
+      "mcp__serena__create_text_file",
+      "mcp__serena__execute_shell_command",
+      "mcp__serena__find_file",
+      "mcp__serena__find_referencing_symbols",
+      "mcp__serena__find_symbol",
+      "mcp__serena__get_current_config",
+      "mcp__serena__get_relevant_memories",
+      "mcp__serena__get_symbols_overview",
+      "mcp__serena__insert_after_symbol",
+      "mcp__serena__insert_before_symbol",
+      "mcp__serena__list_dir",
+      "mcp__serena__onboarding",
+      "mcp__serena__prepare_for_new_conversation",
+      "mcp__serena__read_file",
+      "mcp__serena__rename_symbol",
+      "mcp__serena__replace_regex",
+      "mcp__serena__replace_symbol_body",
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__think_about_collected_information",
+      "mcp__serena__think_about_task_adherence",
+      "mcp__serena__think_about_whether_you_are_done",
+      "mcp__serena__write_memory",
+      
+
+      "Edit",
+      "Read",
+      "WebFetch",
+      "WebSearch",
+      "Write"
+    ],
+    "deny": [
+      "Read(./.dev_docs/.private/**)",
+      "Read(./.dev_docs/dev.prompt.dump.nabu.md)",
+      "Read(./.venv/**)",
+      "Read(./**/.git/**)",
+      "Read(./**/node_modules/**)",
+      "Read(./src/serena/**)",
+
+
+      "TodoWrite"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "nabu",
+    "nisaba",
+    "serena"
+  ],
+  "outputStyle": "default",
+  "spinnerTipsEnabled": false,
+  "alwaysThinkingEnabled": true
+}

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "nabu": {
+      "command": "python",
+      "args": [
+        "-m",            "nabu.mcp.server",
+        "--codebase",    "nabu:/home/y3i12/nabu_nisaba/:/home/y3i12/nabu_nisaba/nabu.kuzu:active:true",
+        "--context",     "development",
+        "--enable-http",
+        "--http-port",   "4800",
+        "--dev-mode"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/y3i12/nabu_nisaba/",
+        "NABU_LOG_LEVEL": "INFO",
+        "NABU_MODEL_CACHE": "/home/y3i12/nabu_nisaba/.nabu/hf_cache/"
+      }
+    },
+    "nisaba": {
+      "type": "http",
+      "url": "http://localhost:9973/mcp"
+    }
+  }
+}

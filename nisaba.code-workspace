@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../.cache/claude-cli-nodejs/-home-y3i12-nisaba"
+		}
+	],
+	"settings": {
+		"favorites.resources": [
+			{
+				"filePath": ".nisaba/request_cache",
+				"group": "Default"
+			}
+		]
+	}
+}

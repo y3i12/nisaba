@@ -1,0 +1,17 @@
+# Model Context Protocol server
+mcp>=1.0.0
+
+# Token counting for accurate context estimation
+tiktoken>=0.5.0
+anthropic>=0.59.0
+mitmproxy>=12.2.0
+claude-code-log>=0.8.0
+
+# Installation Notes
+# ------------------
+#
+# Basic installation:
+#   pip install -r requirements.txt
+#
+# Development installation:
+#   pip install -e .
