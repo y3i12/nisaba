@@ -145,6 +145,50 @@ class AugmentInjector:
         except Exception as e:
             logger.warning(f"Failed to create session symlink: {e}")
 
+    def _extract_session_id(self, metadata: dict) -> Optional[str]:
+        """
+        Extract session ID from request metadata.
+
+        Tries multiple extraction strategies to handle different Claude Code versions:
+        1. Legacy format: user_id contains '_session_<uuid>'
+        2. Direct session_id field in metadata
+        3. user_id is itself a UUID (newer CC versions)
+
+        Args:
+            metadata: The metadata dict from the request body
+
+        Returns:
+            Session ID string or None
+        """
+        import re
+        uuid_pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+
+        user_id = metadata.get('user_id')
+
+        # Strategy 1: Legacy format with _session_ separator
+        if user_id and '_session_' in user_id:
+            session_id = user_id.split('_session_')[1]
+            logger.debug(f"Session ID extracted via _session_ split: {session_id}")
+            return session_id
+
+        # Strategy 2: Direct session_id field
+        session_id = metadata.get('session_id')
+        if session_id:
+            logger.debug(f"Session ID from metadata.session_id: {session_id}")
+            return session_id
+
+        # Strategy 3: user_id is a UUID (might be session_id directly)
+        if user_id:
+            match = uuid_pattern.search(user_id)
+            if match:
+                session_id = match.group(0)
+                logger.debug(f"Session ID extracted as UUID from user_id: {session_id}")
+                return session_id
+
+        if user_id:
+            logger.warning(f"Could not extract session_id from user_id: {user_id!r}")
+        return None
+
     def _get_workspace_files(self, session_id: str) -> 'WorkspaceFiles':
         """Get or create WorkspaceFiles instance for session.
 
@@ -190,22 +234,32 @@ class AugmentInjector:
         if not self._is_anthropic_request(flow):
             return
 
+        logger.debug(f"Intercepted: {flow.request.method} {flow.request.path}")
+
         try:
             # Parse request body as JSON
             body = json.loads(flow.request.content)
 
-            # if it can't be extracted, it will be at some point.
+            # Extract session ID from all requests (including count_tokens)
             try:
-                self.user_id = body.get('metadata', {}).get('user_id', None)
+                metadata = body.get('metadata', {})
+                self.user_id = metadata.get('user_id', None)
 
-                if self.user_id and '_session_' in self.user_id:
-                    self.current_session_id = self.user_id.split('_session_')[1]
+                session_id = self._extract_session_id(metadata)
+                if session_id and session_id != self.current_session_id:
+                    self.current_session_id = session_id
                     # Set session context for MCP tools
                     session_context.set_current_session(self.current_session_id)
                     # Create symlink for main session (not agent mode)
                     self._ensure_main_session_symlink()
+                    logger.info(f"Session ID set: {self.current_session_id}")
             except Exception as e:
+                logger.debug(f"Failed to extract session metadata: {e}")
                 pass
+
+            # Only inject augments on the messages endpoint (not count_tokens, batches, etc.)
+            if not self._is_messages_endpoint(flow):
+                return
 
             # Process system prompt blocks
             if self._inject_augments(body):
@@ -216,6 +270,16 @@ class AugmentInjector:
             logger.error(f"Failed to parse request JSON: {e}")
         except Exception as e:
             logger.error(f"Error processing request: {e}")
+
+    def response(self, flow: http.HTTPFlow) -> None:
+        """Log non-2xx responses from Anthropic API for debugging."""
+        if not self._is_anthropic_request(flow):
+            return
+        if flow.response and flow.response.status_code >= 400:
+            logger.error(
+                f"API error {flow.response.status_code} on {flow.request.method} {flow.request.path} "
+                f"- response: {flow.response.content[:500] if flow.response.content else 'empty'}"
+            )
 
     def _is_anthropic_request(self, flow: http.HTTPFlow) -> bool:
         """
@@ -231,6 +295,18 @@ class AugmentInjector:
             flow.request.method == "POST" and
             "api.anthropic.com" in flow.request.pretty_host
         )
+
+    def _is_messages_endpoint(self, flow: http.HTTPFlow) -> bool:
+        """
+        Check if this is the messages create endpoint (not count_tokens, batches, etc.).
+
+        Returns:
+            True only for POST /v1/messages (the main conversation endpoint)
+        """
+        # Strip query string (e.g. ?beta=true) before comparing
+        path = flow.request.path.split("?")[0].rstrip("/")
+        # Match /v1/messages exactly, not /v1/messages/count_tokens or /v1/messages/batches
+        return path == "/v1/messages"
 
     def _inject_augments(self, body: dict) -> bool:
         """
@@ -268,31 +344,27 @@ class AugmentInjector:
             body["tools"] = filtered_tools
 
         if "system" in body:
-            if len(body["system"]) < 2:
+            injected_content = (
+                f"\n{self._shared_system_prompt.load()}"
+                f"\n{workspace.augments.load()}"
+                f"\n{self._shared_transcript.load()}"
+            )
+
+            # Find the last system block and append our content to it
+            # This preserves CC's original system blocks structure (including
+            # any blocks the API might validate, like the CC identifier)
+            last_idx = len(body["system"]) - 1
+            if last_idx >= 0 and "text" in body["system"][last_idx]:
+                body["system"][last_idx]["text"] += injected_content
+            else:
                 body["system"].append(
                     {
                         "type": "text",
-                        "text": (
-                            f"\n{self._shared_system_prompt.load()}"
-                            f"\n{workspace.augments.load()}"
-                            f"\n{self._shared_transcript.load()}"
-                        ),
+                        "text": injected_content,
                         "cache_control": {
                             "type": "ephemeral"
                         }
                     }
-                )
-            elif "text" in body["system"][1]:
-                # Generate status bar from current state
-                if not workspace.core_system_prompt.file_path.exists() or workspace.core_system_prompt.content != body["system"][1]["text"]:
-                    workspace.core_system_prompt.write(body["system"][1]["text"])
-
-
-                body["system"][1]["text"] = (
-                    f"\n{self._shared_system_prompt.load()}"
-                    f"\n{workspace.core_system_prompt.load()}"
-                    f"\n{workspace.augments.load()}"
-                    f"\n{self._shared_transcript.load()}"
                 )
 
         if 'messages' in body and len(body["messages"]) > 2:
@@ -306,17 +378,32 @@ class AugmentInjector:
                 f"\n</system-reminder>"
             )
 
-            body['messages'].append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": workspace_text
-                        }
-                    ]
-                }
-            )
+            workspace_block = {
+                "type": "text",
+                "text": workspace_text
+            }
+
+            # Check if last message is already from user - merge to avoid
+            # consecutive user messages which violate the API contract
+            last_msg = body['messages'][-1]
+            if last_msg.get('role') == 'user':
+                # Merge into existing user message
+                content = last_msg.get('content', [])
+                if isinstance(content, str):
+                    # Convert string content to list format
+                    last_msg['content'] = [{"type": "text", "text": content}, workspace_block]
+                elif isinstance(content, list):
+                    content.append(workspace_block)
+                else:
+                    last_msg['content'] = [workspace_block]
+            else:
+                # Append new user message
+                body['messages'].append(
+                    {
+                        "role": "user",
+                        "content": [workspace_block]
+                    }
+                )
 
             # TODO: this is mostly for development - it needs to bne switched off
             self._write_to_file(Path(os.getcwd()) / '.nisaba/workspace.md', workspace_text, "Workspace markdow written")
@@ -453,7 +540,7 @@ class AugmentInjector:
             return 0, 0
 
         try:
-            from claude_code_log.parser import load_transcript
+            from claude_code_log.converter import load_transcript
             from claude_code_log.models import AssistantTranscriptEntry
 
             entries = load_transcript(jsonl_path, silent=True)

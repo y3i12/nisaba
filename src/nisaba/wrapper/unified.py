@@ -112,9 +112,12 @@ class UnifiedNisabaServer:
         logger.info(f"🔌 Starting proxy on port {self.proxy_port}...")
 
         # Create mitmproxy options
+        # allow_hosts: only intercept Anthropic API traffic, pass through
+        # everything else (auto-updater, etc.) without TLS interception
         proxy_opts = options.Options(
             listen_port=self.proxy_port,
             mode=["regular"],  # Must be list, not string
+            allow_hosts=[r"api\.anthropic\.com"],
         )
 
         # Create proxy addon with shared AugmentManager
