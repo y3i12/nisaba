@@ -88,18 +88,8 @@ the contents of this section are a prelude to "messages" further in the context 
 tool reference
 ```
 2. Messages:
-... remaining context (messages, commands, tool usage, ...)
-3. workspace:
 ```
-<system_reminder> <- this system reminder is injected by the proxy with the current state of your workspace
---- WORKSPACE ---
----STATUS_BAR
-status of the workspace, showning stats of the context you're working with
----STATUS_BAR_END
----TODOS
-the display of your todo list <- **you can change this** with todo_write
----TODOS_END
-</system_reminder>
+... remaining context (messages, commands, tool usage, ...)
 ```
 
 being able to inject data in the "header" of the entire context, enables you to see the problem from different perspectives.

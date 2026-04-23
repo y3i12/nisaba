@@ -45,16 +45,10 @@ def create_claude_wrapper_command():
         is_flag=True,
         help="Show mitmproxy debug output"
     )
-    @click.option(
-        "--list-servers",
-        is_flag=True,
-        help="List available MCP servers and exit"
-    )
     def claude_wrapper(
         claude_args: tuple,
         proxy_port: int,
         debug_proxy: bool,
-        list_servers: bool
     ):
         """
         Run Claude CLI with augments injection proxy.
@@ -81,39 +75,6 @@ def create_claude_wrapper_command():
             # Debug proxy (show intercepts)
             nabu claude --debug-proxy
         """
-        # Handle --list-servers
-        if list_servers:
-            from nisaba.mcp_registry import MCPServerRegistry
-
-            registry_path = Path.cwd() / ".nisaba" / "mcp_servers.json"
-
-            if not registry_path.exists():
-                click.echo("No MCP servers registered.", err=True)
-                sys.exit(0)
-
-            try:
-                registry = MCPServerRegistry(registry_path)
-                servers = registry.list_servers()
-
-                if not servers:
-                    click.echo("No active MCP servers found.", err=True)
-                    sys.exit(0)
-
-                click.echo(f"📡 Available MCP Servers ({len(servers)}):\n", err=True)
-
-                for server_id, info in servers.items():
-                    click.echo(f"  • {info['name']} (PID: {info['pid']})", err=True)
-                    if info.get('http', {}).get('enabled'):
-                        click.echo(f"    HTTP: {info['http']['url']}", err=True)
-                    click.echo(f"    Started: {info['started_at']}", err=True)
-                    click.echo(f"    CWD: {info['cwd']}\n", err=True)
-
-                sys.exit(0)
-
-            except Exception as e:
-                click.echo(f"❌ Error reading registry: {e}", err=True)
-                sys.exit(1)
-
         # 1. Find real claude binary
         real_claude = shutil.which("claude")
         if not real_claude:

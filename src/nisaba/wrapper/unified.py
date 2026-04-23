@@ -17,8 +17,7 @@ from typing import Optional
 from mitmproxy import options
 from mitmproxy.tools import dump
 
-from nisaba.server.config import NisabaConfig
-from nisaba.server.factory import NisabaMCPFactory
+from nisaba.server.factory import create_nisaba_server
 from nisaba.wrapper.proxy import AugmentInjector
 
 logger = logging.getLogger(__name__)
@@ -75,12 +74,8 @@ class UnifiedNisabaServer:
         self.mcp_port = mcp_port
         self.debug_proxy = debug_proxy
 
-        # Shared state (single source of truth)
-        self.augment_manager: Optional[AugmentManager] = None
-
         # Component references
         self.proxy_master: Optional[dump.DumpMaster] = None
-        self.mcp_factory: Optional[NisabaMCPFactory] = None
         self.mcp_server = None
 
         # Task references for cleanup
@@ -120,8 +115,7 @@ class UnifiedNisabaServer:
             allow_hosts=[r"api\.anthropic\.com"],
         )
 
-        # Create proxy addon with shared AugmentManager
-        proxy_addon = AugmentInjector(augment_manager=self.augment_manager)
+        proxy_addon = AugmentInjector()
 
         # Create DumpMaster with our event loop
         self.proxy_master = dump.DumpMaster(
@@ -155,41 +149,18 @@ class UnifiedNisabaServer:
             raise
 
     async def _start_mcp_server(self) -> None:
-        """Start FastMCP HTTP server with shared AugmentManager."""
+        """Start FastMCP HTTP server."""
         logger.info(f"🤖 Starting MCP server on port {self.mcp_port}...")
 
-        # Create config with HTTP transport DISABLED
-        # (We manually manage HTTP server in unified mode)
-        config = NisabaConfig(
-            dev_mode=False,
-            enable_http_transport=False,  # Don't auto-start, we manage it
-            http_host="localhost",
-            http_port=self.mcp_port,
-            augments_dir=self.augments_dir
+        self.mcp_server = create_nisaba_server(
+            host="localhost",
+            port=self.mcp_port,
         )
 
-        # Create factory with shared AugmentManager
-        self.mcp_factory = NisabaMCPFactory(config)
-
-        # Create MCP server (HTTP transport)
-        self.mcp_server = self.mcp_factory.create_mcp_server(
-            host=config.http_host,
-            port=config.http_port
-        )
-
-        # Start MCP server as background task
         self.mcp_task = asyncio.create_task(self._run_mcp_server())
 
         # Give it a moment to start
         await asyncio.sleep(1)
-
-        # Self-register for discovery (temporarily enable flag to bypass check)
-        original_flag = self.mcp_factory.config.enable_http_transport
-        try:
-            self.mcp_factory.config.enable_http_transport = True
-            self.mcp_factory._register_to_discovery()
-        finally:
-            self.mcp_factory.config.enable_http_transport = original_flag
 
         logger.info(f"✓ MCP server running on port {self.mcp_port}")
 

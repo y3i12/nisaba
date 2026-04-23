@@ -143,7 +143,7 @@ class AugmentManager:
     @property
     def state_file(self) -> Path:
         """Path to state persistence file (session-specific)."""
-        return Path(f".nisaba/request_cache/{self.session_id}/tui/augment_state.json")
+        return Path(f".nisaba/sessions/{self.session_id}/state.json")
 
     def save_state(self) -> None:
         """Save active augments to session-specific JSON file."""

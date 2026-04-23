@@ -13,9 +13,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Add src to path for nisaba imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from nisaba.workspace_files import WorkspaceFiles
+from nisaba.structured_file import StructuredFileCache
 
 
 def extract_transcript(jsonl_path: Path, session_id: str) -> str:
@@ -37,6 +35,10 @@ def extract_transcript(jsonl_path: Path, session_id: str) -> str:
     transcript_lines.append("---")
 
     last_role = ""
+    
+    tasks = {}
+    searches = {}
+    
     with open(jsonl_path, 'r') as f:
         for line in f:
             if not line.strip():
@@ -88,6 +90,36 @@ def extract_transcript(jsonl_path: Path, session_id: str) -> str:
                     if thinking:
                         text_parts.append(f"<thinking>\n{thinking}\n</thinking>")
 
+                # Extract Task tool calls
+                elif block_type == 'tool_use':
+                    if block.get('name', '') == 'Task' and 'input' in block:
+                        task_input = block.get('input') # "input":{"description":"...","prompt":"...", subagent_type:"..."}
+                        tasks[block.get('id')] = task_input
+                    elif block.get('name', '') == 'WebSearch' and 'input' in block:
+                        search_input = block.get('input')
+                        searches[block.get('id')] = search_input
+                    
+                # Extract Task tool results
+                elif block_type == 'tool_result':
+                    task_input = tasks.get(block.get('tool_use_id')) # "input":{"description":"...","prompt":"...", subagent_type:"..."}
+                    search_input = searches.get(block.get('tool_use_id')) # "input":{"description":"...","prompt":"...", subagent_type:"..."}
+                    text = ''
+
+                    if task_input or search_input:
+                        role = 'assistant' # forces to assistant
+                        tool_u_content = block.get('content')
+                        if isinstance(tool_u_content, list):
+                            for content_block in tool_u_content:
+                                if isinstance(content_block, dict) and 'text' in content_block:
+                                    text += "\n" + content_block.get('text', '')
+                        if isinstance(tool_u_content, str):
+                            text = "\n" + tool_u_content
+                    
+                    if task_input:
+                        text_parts.append(f"<task>\n<description>{task_input.get('description', '')}</description>\n<prompt>\n{task_input.get('prompt', '')}\n</prompt>\n\n<result>\n{text}\n</result>\n</task>")
+                    elif search_input:
+                        text_parts.append(f"<web_search>\n<query>{search_input.get('query', '')}</query>\n<result>\n{text}\n</result>\n</web_search>")
+
             # Add to transcript if we have text
             if text_parts:
                 if last_role != role:
@@ -109,21 +141,25 @@ def main():
         session_id = None
         hook_data = None
 
-        # Try stdin (hook data)
-        try:
-            hook_data = json.load(sys.stdin)
-            if 'transcript_path' in hook_data and 'session_id' in hook_data:
-                session_file = Path(hook_data['transcript_path'])
-                session_id = hook_data['session_id']
-        except (json.JSONDecodeError, KeyError, ValueError):
-            # Fallback to args
-            if not session_file and len(sys.argv) > 1:
-                session_file = Path(sys.argv[1])
-            if not session_file or not session_file.exists():
-                print("No session file found - skipping transcript extraction", file=sys.stderr)
-                sys.exit(1)
-            # Extract session ID from filename (e.g., "049c4152-c17e-42f2-9d51-8c4864f20b75.jsonl")
-            session_id = session_file.stem
+        if not sys.stdin.isatty():
+            # Try stdin (hook data)
+            try:
+                hook_data = json.load(sys.stdin)
+                if 'transcript_path' in hook_data:
+                    session_file = Path(hook_data['transcript_path'])
+            except (json.JSONDecodeError, KeyError, ValueError):
+                # Fallback to args
+                pass
+
+        if not session_file and len(sys.argv) > 1:
+            session_file = Path(sys.argv[1])
+                
+        if not session_file or not session_file.exists():
+            print("No session file found - skipping transcript extraction", file=sys.stderr)
+            sys.exit(1)
+
+        # Extract session ID from filename (e.g., "049c4152-c17e-42f2-9d51-8c4864f20b75.jsonl")
+        session_id = session_file.stem
 
         # Extract transcript for this session
         new_transcript = extract_transcript(session_file, session_id)
@@ -133,10 +169,15 @@ def main():
             sys.exit(0)
 
         # Accumulate with existing transcript (prepend old history)
-        cache = WorkspaceFiles.instance(session_id).transcript
-        existing = cache.content if cache.content else ""
-        cache.write(existing + "\n\n" + new_transcript)
-        print(f"Transcript saved via WorkspaceFiles singleton", file=sys.stderr)
+        cache = StructuredFileCache(
+            file_path=Path(".nisaba/base_files/compacted_transcript.md"),
+            name="transcript",
+            tag="COMPACTED_TRANSCRIPT",
+        )
+        cache.load()
+        existing = cache.content + "\n\n" if cache.content else ""
+        cache.write(existing + new_transcript)
+        print("Transcript saved to .nisaba/base_files/compacted_transcript.md", file=sys.stderr)
 
         # Exit 0: Allow CLI compaction to proceed
         sys.exit(0)

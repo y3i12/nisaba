@@ -1,6 +1,5 @@
 """Nisaba MCP server."""
 
-from nisaba.server.config import NisabaConfig
-from nisaba.server.factory import NisabaMCPFactory
+from nisaba.server.factory import create_nisaba_server
 
-__all__ = ["NisabaConfig", "NisabaMCPFactory"]
+__all__ = ["create_nisaba_server"]

@@ -1,111 +1,96 @@
-"""Nisaba MCP server factory."""
+"""Build a FastMCP server with the augment tool registered."""
 
-from contextlib import asynccontextmanager
-from typing import AsyncIterator, Iterator
-from pathlib import Path
+import inspect
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
-from nisaba import MCPFactory
-from nisaba.server.config import NisabaConfig
+from typing_extensions import Annotated
+from pydantic import Field
+
+from nisaba.tools.augment import AugmentTool
 from nisaba.tools.base_tool import BaseTool
 
 logger = logging.getLogger(__name__)
 
+_JSON_TO_PY = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
 
-class NisabaMCPFactory(MCPFactory):
-    """Factory for nisaba MCP server - augments management only."""
 
-    def __init__(self, config: NisabaConfig):
-        """Initialize nisaba factory."""
-        super().__init__(config)
+@asynccontextmanager
+async def _lifespan(mcp_server: FastMCP) -> AsyncIterator[None]:
+    logger.info("Nisaba MCP Server - Ready")
+    yield
+    logger.info("Nisaba MCP Server - Shutdown")
 
-        # Tool instances cache
-        self._tool_instances = None
 
-    def _get_tool_base_class(self) -> type:
-        """Return NisabaTool as base class."""
-        return BaseTool
+def _register_tool(mcp: FastMCP, tool: BaseTool) -> None:
+    """
+    Register a BaseTool with FastMCP via a dynamically-built typed wrapper.
 
-    def _get_module_prefix(self) -> str:
-        """Return nisaba tools module prefix."""
-        return "nisaba.tools"
+    FastMCP introspects real Python annotations to generate the parameter
+    schema shown to LLM clients, so we build a function with type hints that
+    match the tool's declared schema and hand it to `mcp.tool(...)`.
+    """
+    schema = tool.get_tool_schema()
+    tool_name = tool.get_name()
+    description = schema.get("description", "")
+    params_schema = schema.get("parameters", {})
+    properties = params_schema.get("properties", {})
+    required = set(params_schema.get("required", []))
 
-    def _iter_tools(self) -> Iterator[BaseTool]:
-        """
-        Iterate over enabled tool instances.
+    annotations: dict = {}
+    param_defs: list[str] = []
+    for param_name, param_info in properties.items():
+        python_type = _JSON_TO_PY.get(param_info.get("type", "string"), str)
+        param_desc = param_info.get("description", "")
+        default_value = param_info.get("default", inspect.Parameter.empty)
 
-        Lazily instantiates tools on first call.
-        """
-        if self._tool_instances is None:
-            self._instantiate_tools()
+        annotations[param_name] = (
+            Annotated[python_type, Field(description=param_desc)]
+            if param_desc else python_type
+        )
 
-        return iter(self._tool_instances)
+        if param_name in required:
+            param_defs.append(param_name)
+        elif default_value == inspect.Parameter.empty:
+            param_defs.append(f"{param_name}=None")
+        else:
+            param_defs.append(f"{param_name}={default_value!r}")
 
-    def _instantiate_tools(self):
-        """Create tool instances for enabled tools."""
-        enabled_tool_names = self._filter_enabled_tools()
+    param_list = ", ".join(param_defs)
+    kwargs_build = "{" + ", ".join(f"'{p}': {p}" for p in properties) + "}"
 
-        self._tool_instances = []
+    func_code = f"""
+async def typed_wrapper({param_list}):
+    from dataclasses import asdict
+    kwargs = {kwargs_build}
+    response = await tool_instance.execute_tool(**kwargs)
+    return asdict(response) if not isinstance(response, dict) else response
+"""
+    namespace = {"tool_instance": tool}
+    exec(func_code, namespace)
+    wrapper = namespace["typed_wrapper"]
+    wrapper.__annotations__ = annotations
 
-        for tool_name in enabled_tool_names:
-            try:
-                tool_class = self.registry.get_tool_class(tool_name)
-                tool_instance = tool_class(factory=self)
-                self._tool_instances.append(tool_instance)
-            except Exception as e:
-                logger.error(f"Failed to instantiate tool {tool_name}: {e}")
+    mcp.tool(name=tool_name, description=description)(wrapper)
 
-        logger.info(f"Instantiated {len(self._tool_instances)} tools: {enabled_tool_names}")
 
-    def _get_initial_instructions(self) -> str:
-        try:
-            # Load template using nisaba's engine
-            # instructions_path = Path(__file__).parent / "resources" / "instructions_template.md"
-            # engine = self._load_template_engine(
-            #     template_path=instructions_path,
-            #     runtime_context={'dev_mode': self.config.dev_mode}
-            # )
-
-            # # Generate dynamic sections
-            # logger.info("Generating MCP instructions...")
-
-            # # Render with placeholders and clear unused ones
-            # instructions = engine.render_and_clear()
-
-            # logger.info(f"Generated instructions ({len(instructions)} chars)")
-            # return instructions
-            return ""
-
-        except Exception as e:
-            logger.error(f"Failed to generate instructions: {e}", exc_info=True)
-            return ""
-
-    @asynccontextmanager
-    async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
-        """Manage nisaba server lifecycle."""
-        logger.info("=" * 60)
-        logger.info("Nisaba MCP Server - Lifecycle Starting")
-        logger.info("=" * 60)
-
-        # Register tools
-        self._register_tools(mcp_server)
-
-        # Start HTTP transport if enabled
-        await self._start_http_transport_if_enabled()
-
-        logger.info("Nisaba MCP Server - Ready")
-        logger.info("=" * 60)
-
-        yield  # Server runs here
-
-        # SHUTDOWN
-        logger.info("=" * 60)
-        logger.info("Nisaba MCP Server - Lifecycle Shutdown")
-        logger.info("=" * 60)
-
-        # Stop HTTP transport
-        await self._stop_http_transport()
-
-        logger.info("Nisaba MCP Server - Shutdown Complete")
-        logger.info("=" * 60)
+def create_nisaba_server(host: str = "0.0.0.0", port: int = 9973) -> FastMCP:
+    """Build the nisaba FastMCP server with AugmentTool registered."""
+    mcp = FastMCP(
+        name="nisaba",
+        lifespan=_lifespan,
+        host=host,
+        port=port,
+        instructions="",
+    )
+    _register_tool(mcp, AugmentTool())
+    return mcp
