@@ -15,10 +15,6 @@
         "NABU_LOG_LEVEL": "INFO",
         "NABU_MODEL_CACHE": "/home/y3i12/nabu_nisaba/.nabu/hf_cache/"
       }
-    },
-    "nisaba": {
-      "type": "http",
-      "url": "http://localhost:9973/mcp"
     }
   }
 }

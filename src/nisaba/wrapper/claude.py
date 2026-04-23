@@ -5,14 +5,21 @@ Provides a click command that wraps the real claude CLI with augments
 injection via mitmproxy.
 """
 
+import json
 import os
+import socket
 import sys
 import shutil
-import subprocess
-import time
 from pathlib import Path
 
 import click
+
+
+def _find_free_port() -> int:
+    """Ask the OS for a free port. Tiny TOCTOU race is acceptable for local dev."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 def create_claude_wrapper_command():
@@ -37,8 +44,14 @@ def create_claude_wrapper_command():
     @click.option(
         "--proxy-port",
         type=int,
-        default=1337,
-        help="Port for mitmproxy (default: 1337)"
+        default=None,
+        help="Port for mitmproxy (default: auto-allocate)"
+    )
+    @click.option(
+        "--mcp-port",
+        type=int,
+        default=None,
+        help="Port for nisaba MCP HTTP server (default: auto-allocate)"
     )
     @click.option(
         "--debug-proxy",
@@ -48,32 +61,37 @@ def create_claude_wrapper_command():
     def claude_wrapper(
         claude_args: tuple,
         proxy_port: int,
+        mcp_port: int,
         debug_proxy: bool,
     ):
         """
         Run Claude CLI with augments injection proxy.
 
-        This command starts mitmproxy in the background to intercept
-        Anthropic API requests and inject augments content by replacing
-        __NISABA_AUGMENTS_PLACEHOLDER__ in the system prompt.
+        Starts mitmproxy and the nisaba MCP server on auto-allocated ports
+        (or the explicit --proxy-port / --mcp-port if given), then launches
+        the real claude CLI with HTTPS_PROXY pointing at the proxy and the
+        nisaba MCP server injected via --mcp-config.
 
-        The proxy runs on port 1337 (or --proxy-port) and is automatically
-        stopped when claude exits.
+        This means multiple `nisaba claude` instances can run in parallel
+        without port collisions, and `.mcp.json` does not need a nisaba entry.
 
         Examples:
 
             \b
-            # Run claude with default augments (./test.md)
-            nabu claude
+            # Default: auto-allocate both ports
+            nisaba claude
 
             \b
-            # Pass arguments to claude
-            nabu claude --project myproject
-            nabu claude -m "analyze this code"
+            # Pass arguments through to claude
+            nisaba claude --continue
+
+            \b
+            # Pin ports (useful for attaching mitmweb / debugging)
+            nisaba claude --proxy-port 1337 --mcp-port 9973
 
             \b
             # Debug proxy (show intercepts)
-            nabu claude --debug-proxy
+            nisaba claude --debug-proxy
         """
         # 1. Find real claude binary
         real_claude = shutil.which("claude")
@@ -88,23 +106,32 @@ def create_claude_wrapper_command():
             click.echo(f"⚠️  Warning: Augments directory not found: {augments_dir}", err=True)
             click.echo("Augments system will start with no augments loaded.\n", err=True)
 
-        # Build modified claude_args with system prompt injection
-        modified_claude_args = list(claude_args)
+        # 3. Resolve ports (auto-allocate if not pinned)
+        if proxy_port is None:
+            proxy_port = _find_free_port()
+        if mcp_port is None:
+            mcp_port = _find_free_port()
 
-        # being injected by the proxy
-        # Add --append-system-prompt before other args
-        # modified_claude_args = ["--debug"] + modified_claude_args
+        click.echo(f"🚀 Starting Nisaba — proxy:{proxy_port} mcp:{mcp_port}", err=True)
 
-        # 4. Start unified server (proxy + MCP)
-        click.echo(f"🚀 Starting unified Nisaba server...", err=True)
+        # 4. Build inline MCP config so claude discovers nisaba on the resolved port
+        nisaba_mcp_config = {
+            "mcpServers": {
+                "nisaba": {
+                    "type": "http",
+                    "url": f"http://localhost:{mcp_port}/mcp",
+                }
+            }
+        }
+        modified_claude_args = [
+            "--mcp-config", json.dumps(nisaba_mcp_config),
+            *claude_args,
+        ]
 
+        # 5. Start unified server (proxy + MCP)
         import asyncio
         from nisaba.wrapper.unified import UnifiedNisabaServer
 
-        # MCP port (9973 - last prime before 10000)
-        mcp_port = 9973
-
-        # Create unified server
         server = UnifiedNisabaServer(
             augments_dir=augments_dir,
             proxy_port=proxy_port,
@@ -136,7 +163,7 @@ def create_claude_wrapper_command():
                     click.echo(f"   Expected at: {mitmproxy_ca}", err=True)
                     click.echo("   Run mitmproxy once to generate certificates", err=True)
 
-                click.echo(f"🤖 Executing: {real_claude} {' '.join(modified_claude_args)}\n", err=True)
+                click.echo(f"🤖 Executing: {real_claude} {' '.join(claude_args)}\n", err=True)
 
                 # Run claude CLI as subprocess (blocking)
                 result = await asyncio.create_subprocess_exec(
@@ -162,9 +189,6 @@ def create_claude_wrapper_command():
                 return 130
             except Exception as e:
                 raise e
-                click.echo(f"\n❌ Error: {e}", err=True)
-                await server.stop()
-                return 1
 
         # Run the async workflow
         try:

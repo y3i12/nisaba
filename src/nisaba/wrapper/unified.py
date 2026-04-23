@@ -1,11 +1,9 @@
 """
 Unified server that runs both mitmproxy and FastMCP HTTP in same process.
 
-This module provides the unified architecture where:
-- mitmproxy runs as proxy on port 1337
-- FastMCP HTTP runs as MCP server on port 9973
-- Both share the same AugmentManager instance (in-memory)
-- Checkpoint-based context compression via shared state
+Ports are passed in by the caller (auto-allocated by the CLI wrapper, or
+pinned via --proxy-port / --mcp-port). Both components share the same
+AugmentManager instance in-memory.
 """
 
 import asyncio
@@ -56,8 +54,8 @@ class UnifiedNisabaServer:
     def __init__(
         self,
         augments_dir: Path,
-        proxy_port: int = 1337,
-        mcp_port: int = 9973,
+        proxy_port: int,
+        mcp_port: int,
         debug_proxy: bool = False
     ):
         """
@@ -65,8 +63,8 @@ class UnifiedNisabaServer:
 
         Args:
             augments_dir: Directory containing augment files
-            proxy_port: Port for mitmproxy (default: 1337)
-            mcp_port: Port for MCP HTTP server (default: 9973)
+            proxy_port: Port for mitmproxy
+            mcp_port: Port for MCP HTTP server
             debug_proxy: Show proxy debug output
         """
         self.augments_dir = Path(augments_dir)
@@ -233,40 +231,3 @@ class UnifiedNisabaServer:
             await self.stop()
 
 
-async def run_unified_server(
-    augments_dir: Path,
-    proxy_port: int = 1337,
-    mcp_port: int = 9973,
-    debug_proxy: bool = False,
-    timeout: Optional[float] = None
-) -> None:
-    """
-    Run unified server for a specific duration or until interrupted.
-
-    Args:
-        augments_dir: Directory containing augment files
-        proxy_port: Port for proxy (default: 1337)
-        mcp_port: Port for MCP server (default: 9973)
-        debug_proxy: Show proxy debug output
-        timeout: Optional timeout in seconds (for testing)
-    """
-    server = UnifiedNisabaServer(
-        augments_dir=augments_dir,
-        proxy_port=proxy_port,
-        mcp_port=mcp_port,
-        debug_proxy=debug_proxy
-    )
-
-    try:
-        if timeout:
-            # Run with timeout (for testing)
-            await asyncio.wait_for(server.run_until_stopped(), timeout=timeout)
-        else:
-            # Run indefinitely
-            await server.run_until_stopped()
-    except asyncio.TimeoutError:
-        logger.info(f"Server timeout after {timeout}s")
-    except KeyboardInterrupt:
-        logger.info("Server interrupted by user")
-    finally:
-        await server.stop()
