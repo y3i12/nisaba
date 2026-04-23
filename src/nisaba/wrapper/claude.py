@@ -130,7 +130,11 @@ def create_claude_wrapper_command():
 
         # 5. Start unified server (proxy + MCP)
         import asyncio
+        from nisaba.compact import clear_active_pointer, write_active_pointer
         from nisaba.wrapper.unified import UnifiedNisabaServer
+
+        instance_id = str(os.getpid())
+        write_active_pointer(instance_id)
 
         server = UnifiedNisabaServer(
             augments_dir=augments_dir,
@@ -149,6 +153,7 @@ def create_claude_wrapper_command():
                 env = os.environ.copy()
                 env["HTTPS_PROXY"] = f"http://localhost:{proxy_port}"
                 env["HTTP_PROXY"] = f"http://localhost:{proxy_port}"
+                env["NISABA_INSTANCE_ID"] = instance_id
 
                 # SSL certificate setup for mitmproxy
                 mitmproxy_ca = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
@@ -180,14 +185,17 @@ def create_claude_wrapper_command():
 
                 # Cleanup
                 await server.stop()
+                clear_active_pointer(instance_id)
 
                 return result.returncode
 
             except KeyboardInterrupt:
                 click.echo("\n\n⚠️  Interrupted by user", err=True)
                 await server.stop()
+                clear_active_pointer(instance_id)
                 return 130
             except Exception as e:
+                clear_active_pointer(instance_id)
                 raise e
 
         # Run the async workflow

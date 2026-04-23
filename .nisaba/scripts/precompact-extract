@@ -1,194 +1,55 @@
 #!/usr/bin/env python3
 """
-PreCompact Hook: Extract conversational narrative before compaction.
+PreCompact hook / manual transcript extractor.
 
-Reads .jsonl, filters out tool blocks, extracts text content,
-and saves to .nisaba/tui/compacted_transcript.md
-
-Exit code 0: Allow CLI's native compaction to proceed.
+Thin wrapper around nisaba.compact — kept for PreCompact hook usage
+(stdin JSON with transcript_path) and explicit-path invocation.
+For the common case, prefer `nisaba compact` which auto-discovers
+the active session.
 """
 
 import json
 import sys
 from pathlib import Path
-from datetime import datetime
 
-from nisaba.structured_file import StructuredFileCache
+from nisaba.compact import append_to_cache, extract_transcript
 
 
-def extract_transcript(jsonl_path: Path, session_id: str) -> str:
-    """
-    Extract conversational text from .jsonl.
-
-    Returns markdown-formatted transcript with:
-    - Session ID header
-    - User messages (text only)
-    - Assistant messages (text only, no tool_use)
-    - Timestamps preserved
-    """
-    if not jsonl_path.exists():
-        return ""
-
-    transcript_lines = []
-    transcript_lines.append("---")
-    transcript_lines.append(f"Session: {session_id} - {jsonl_path} - {datetime.now().isoformat()}")
-    transcript_lines.append("---")
-
-    last_role = ""
-    
-    tasks = {}
-    searches = {}
-    
-    with open(jsonl_path, 'r') as f:
-        for line in f:
-            if not line.strip():
-                continue
-
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # Skip corrupted lines
-
-            msg_type = entry.get('type')
-            message = entry.get('message', {})
-            content = message.get('content', [])
-            role = message.get('role', msg_type)
-
-            # Handle user messages (content is a string)
-            if isinstance(content, str):
-                text = content.strip()
-                if text:
-                    if last_role != role:
-                        transcript_lines.append(f"# {role.upper()}")
-                        transcript_lines.append("")
-                        last_role = role
-                    transcript_lines.append(text)
-                    transcript_lines.append("")
-                continue
-
-            # Handle assistant messages (content is a list of blocks)
-            if not isinstance(content, list):
-                continue
-
-            # Extract text blocks only
-            text_parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-
-                block_type = block.get('type')
-
-                # Extract text content
-                if block_type == 'text':
-                    text = block.get('text', '').strip()
-                    if text:
-                        text_parts.append(text)
-
-                # Extract thinking blocks (preserve them)
-                elif block_type == 'thinking':
-                    thinking = block.get('thinking', '').strip()
-                    if thinking:
-                        text_parts.append(f"<thinking>\n{thinking}\n</thinking>")
-
-                # Extract Task tool calls
-                elif block_type == 'tool_use':
-                    if block.get('name', '') == 'Task' and 'input' in block:
-                        task_input = block.get('input') # "input":{"description":"...","prompt":"...", subagent_type:"..."}
-                        tasks[block.get('id')] = task_input
-                    elif block.get('name', '') == 'WebSearch' and 'input' in block:
-                        search_input = block.get('input')
-                        searches[block.get('id')] = search_input
-                    
-                # Extract Task tool results
-                elif block_type == 'tool_result':
-                    task_input = tasks.get(block.get('tool_use_id')) # "input":{"description":"...","prompt":"...", subagent_type:"..."}
-                    search_input = searches.get(block.get('tool_use_id')) # "input":{"description":"...","prompt":"...", subagent_type:"..."}
-                    text = ''
-
-                    if task_input or search_input:
-                        role = 'assistant' # forces to assistant
-                        tool_u_content = block.get('content')
-                        if isinstance(tool_u_content, list):
-                            for content_block in tool_u_content:
-                                if isinstance(content_block, dict) and 'text' in content_block:
-                                    text += "\n" + content_block.get('text', '')
-                        if isinstance(tool_u_content, str):
-                            text = "\n" + tool_u_content
-                    
-                    if task_input:
-                        text_parts.append(f"<task>\n<description>{task_input.get('description', '')}</description>\n<prompt>\n{task_input.get('prompt', '')}\n</prompt>\n\n<result>\n{text}\n</result>\n</task>")
-                    elif search_input:
-                        text_parts.append(f"<web_search>\n<query>{search_input.get('query', '')}</query>\n<result>\n{text}\n</result>\n</web_search>")
-
-            # Add to transcript if we have text
-            if text_parts:
-                if last_role != role:
-                    transcript_lines.append(f"# {role.upper()}")
-                    transcript_lines.append("")
-                    last_role = role
-                for part in text_parts:
-                    transcript_lines.append(part)
-                    transcript_lines.append("")
-
-    return "\n".join(transcript_lines)
-
-# { "transcript_path": "/home/y3i12/.claude/projects/-home-y3i12-nabu-nisaba/88961878-73bc-4a9d-b1f0-16fe525983ea.jsonl", "session_id": "88961878-73bc-4a9d-b1f0-16fe525983ea" }
 def main():
-    """PreCompact hook entry point."""
     try:
-        # Get session file
         session_file = None
-        session_id = None
-        hook_data = None
 
         if not sys.stdin.isatty():
-            # Try stdin (hook data)
             try:
                 hook_data = json.load(sys.stdin)
-                if 'transcript_path' in hook_data:
-                    session_file = Path(hook_data['transcript_path'])
+                if "transcript_path" in hook_data:
+                    session_file = Path(hook_data["transcript_path"])
             except (json.JSONDecodeError, KeyError, ValueError):
-                # Fallback to args
                 pass
 
         if not session_file and len(sys.argv) > 1:
             session_file = Path(sys.argv[1])
-                
+
         if not session_file or not session_file.exists():
             print("No session file found - skipping transcript extraction", file=sys.stderr)
             sys.exit(1)
 
-        # Extract session ID from filename (e.g., "049c4152-c17e-42f2-9d51-8c4864f20b75.jsonl")
         session_id = session_file.stem
-
-        # Extract transcript for this session
-        new_transcript = extract_transcript(session_file, session_id)
-
-        if not new_transcript:
+        transcript = extract_transcript(session_file, session_id)
+        if not transcript:
             print("No transcript content extracted", file=sys.stderr)
             sys.exit(0)
 
-        # Accumulate with existing transcript (prepend old history)
-        cache = StructuredFileCache(
-            file_path=Path(".nisaba/base_files/compacted_transcript.md"),
-            name="transcript",
-            tag="COMPACTED_TRANSCRIPT",
-        )
-        cache.load()
-        existing = cache.content + "\n\n" if cache.content else ""
-        cache.write(existing + new_transcript)
+        append_to_cache(transcript)
         print("Transcript saved to .nisaba/base_files/compacted_transcript.md", file=sys.stderr)
-
-        # Exit 0: Allow CLI compaction to proceed
         sys.exit(0)
 
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
-        # Exit 0 even on error - don't block compaction
         sys.exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
