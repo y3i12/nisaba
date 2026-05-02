@@ -47,7 +47,7 @@ def clear_active_pointer(instance_id: str) -> None:
 
 def jsonl_path_for_session(session_id: str) -> Path:
     """Claude CLI stores sessions at ~/.claude/projects/<cwd-with-/-as-dashes>/<uuid>.jsonl."""
-    cwd_normalized = str(Path.cwd()).replace("/", "-")
+    cwd_normalized = str(Path.cwd()).replace("/", "-").replace("_", "-")
     return Path.home() / ".claude" / "projects" / cwd_normalized / f"{session_id}.jsonl"
 
 
@@ -87,7 +87,7 @@ def discover_active_jsonl(instance_id: Optional[str]) -> Path:
     JSONL wins. Use --session <uuid> to override.
     """
     cwd = str(Path.cwd())
-    cwd_normalized = cwd.replace("/", "-")
+    cwd_normalized = cwd.replace("/", "-").replace("_", "-")
     project_dir = Path.home() / ".claude" / "projects" / cwd_normalized
 
     if not project_dir.exists():
@@ -164,7 +164,7 @@ def extract_transcript(jsonl_path: Path, session_id: str) -> str:
 
     transcript_lines = [
         "---",
-        f"Session: {session_id} - {jsonl_path} - {datetime.now().isoformat()}",
+        f"Session: {session_id} - {datetime.now().isoformat()}",
         "---",
     ]
 
