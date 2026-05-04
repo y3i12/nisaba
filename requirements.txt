@@ -2,7 +2,7 @@
 mcp>=1.0.0
 
 anthropic>=0.59.0
-mitmproxy>=12.2.0
+httpx>=0.25.0
 
 # Installation Notes
 # ------------------

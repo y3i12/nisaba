@@ -1,16 +1,10 @@
-"""
-Claude CLI wrapper command for nisaba.
-
-Provides a click command that wraps the real claude CLI with augments
-injection via mitmproxy.
-"""
-
 import json
 import os
 import socket
 import sys
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -20,6 +14,26 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+def _read_claude_settings() -> tuple[Optional[dict], Optional[str]]:
+    """Read ~/.claude/settings.json. Returns (parsed_dict, raw_text) or (None, None)."""
+    path = Path.home() / ".claude" / "settings.json"
+    if not path.exists():
+        return None, None
+    try:
+        text = path.read_text()
+        return json.loads(text), text
+    except Exception:
+        return None, None
+
+
+def _write_claude_settings(data: dict) -> None:
+    """Atomically write ~/.claude/settings.json."""
+    path = Path.home() / ".claude" / "settings.json"
+    tmp = path.with_suffix(".nisaba.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.rename(path)
 
 
 def create_claude_wrapper_command():
@@ -45,7 +59,7 @@ def create_claude_wrapper_command():
         "--proxy-port",
         type=int,
         default=None,
-        help="Port for mitmproxy (default: auto-allocate)"
+        help="Port for relay (default: auto-allocate)"
     )
     @click.option(
         "--mcp-port",
@@ -56,7 +70,7 @@ def create_claude_wrapper_command():
     @click.option(
         "--debug-proxy",
         is_flag=True,
-        help="Show mitmproxy debug output"
+        help="Show relay debug output"
     )
     def claude_wrapper(
         claude_args: tuple,
@@ -65,11 +79,11 @@ def create_claude_wrapper_command():
         debug_proxy: bool,
     ):
         """
-        Run Claude CLI with augments injection proxy.
+        Run Claude CLI with augments injection relay.
 
-        Starts mitmproxy and the nisaba MCP server on auto-allocated ports
+        Starts a local HTTP relay and the nisaba MCP server on auto-allocated ports
         (or the explicit --proxy-port / --mcp-port if given), then launches
-        the real claude CLI with HTTPS_PROXY pointing at the proxy and the
+        the real claude CLI with ANTHROPIC_BASE_URL pointing at the relay and the
         nisaba MCP server injected via --mcp-config.
 
         This means multiple `nisaba claude` instances can run in parallel
@@ -86,7 +100,7 @@ def create_claude_wrapper_command():
             nisaba claude --continue
 
             \b
-            # Pin ports (useful for attaching mitmweb / debugging)
+            # Pin ports (useful for debugging)
             nisaba claude --proxy-port 1337 --mcp-port 9973
 
             \b
@@ -112,9 +126,29 @@ def create_claude_wrapper_command():
         if mcp_port is None:
             mcp_port = _find_free_port()
 
-        click.echo(f"🚀 Starting Nisaba — proxy:{proxy_port} mcp:{mcp_port}", err=True)
+        relay_url = f"http://127.0.0.1:{proxy_port}"
+        click.echo(f"🚀 Starting Nisaba — relay:{proxy_port} mcp:{mcp_port}", err=True)
 
-        # 4. Build inline MCP config so claude discovers nisaba on the resolved port
+        # 4. Determine upstream URL and patch ~/.claude/settings.json so the
+        #    claude binary uses our relay instead of its configured base URL.
+        #    We restore the original content on exit (including on crash).
+        settings, original_settings_text = _read_claude_settings()
+        upstream_url = "https://api.anthropic.com"
+        patched_settings = False
+
+        if settings is not None:
+            env_section = settings.get("env", {}) or {}
+            if existing := env_section.get("ANTHROPIC_BASE_URL"):
+                upstream_url = existing.rstrip("/")
+            settings.setdefault("env", {})["ANTHROPIC_BASE_URL"] = relay_url
+            try:
+                _write_claude_settings(settings)
+                patched_settings = True
+                click.echo(f"🔀 Relay: {relay_url}  →  upstream: {upstream_url}", err=True)
+            except Exception as e:
+                click.echo(f"⚠️  Could not patch settings.json ({e}), falling back to env var", err=True)
+
+        # 6. Build inline MCP config so claude discovers nisaba on the resolved port
         nisaba_mcp_config = {
             "mcpServers": {
                 "nisaba": {
@@ -128,7 +162,7 @@ def create_claude_wrapper_command():
             *claude_args,
         ]
 
-        # 5. Start unified server (proxy + MCP)
+        # 7. Start unified server (relay + MCP)
         import asyncio
         from nisaba.compact import clear_active_pointer, write_active_pointer
         from nisaba.wrapper.unified import UnifiedNisabaServer
@@ -140,7 +174,8 @@ def create_claude_wrapper_command():
             augments_dir=augments_dir,
             proxy_port=proxy_port,
             mcp_port=mcp_port,
-            debug_proxy=debug_proxy
+            debug_proxy=debug_proxy,
+            upstream_url=upstream_url,
         )
 
         async def run_with_claude():
@@ -151,22 +186,13 @@ def create_claude_wrapper_command():
 
                 # Setup environment for claude CLI
                 env = os.environ.copy()
-                env["HTTPS_PROXY"] = f"http://localhost:{proxy_port}"
-                env["HTTP_PROXY"] = f"http://localhost:{proxy_port}"
                 env["NISABA_INSTANCE_ID"] = instance_id
 
-                # SSL certificate setup for mitmproxy
-                mitmproxy_ca = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
-                if mitmproxy_ca.exists():
-                    env["SSL_CERT_FILE"] = str(mitmproxy_ca)
-                    env["REQUESTS_CA_BUNDLE"] = str(mitmproxy_ca)
-                    env["NODE_EXTRA_CA_CERTS"] = str(mitmproxy_ca)
-                    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-                    click.echo(f"🔒 Using mitmproxy CA: {mitmproxy_ca}", err=True)
-                else:
-                    click.echo("⚠️  Warning: mitmproxy CA certificate not found", err=True)
-                    click.echo(f"   Expected at: {mitmproxy_ca}", err=True)
-                    click.echo("   Run mitmproxy once to generate certificates", err=True)
+                # Always set env var as fallback in case settings.json patch didn't apply.
+                # Point the claude binary at our local relay.
+                # The relay receives plain HTTP and forwards to api.anthropic.com
+                # over HTTPS — no TLS interception or proxy certificates needed.
+                env["ANTHROPIC_BASE_URL"] = relay_url
 
                 click.echo(f"🤖 Executing: {real_claude} {' '.join(claude_args)}\n", err=True)
 
@@ -205,5 +231,14 @@ def create_claude_wrapper_command():
         except KeyboardInterrupt:
             click.echo("\n\n⚠️  Interrupted by user", err=True)
             sys.exit(130)
+        finally:
+            if patched_settings and original_settings_text is not None:
+                try:
+                    path = Path.home() / ".claude" / "settings.json"
+                    tmp = path.with_suffix(".nisaba.tmp")
+                    tmp.write_text(original_settings_text)
+                    tmp.rename(path)
+                except Exception as e:
+                    click.echo(f"⚠️  Could not restore settings.json: {e}", err=True)
 
     return claude_wrapper

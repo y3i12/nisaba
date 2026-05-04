@@ -356,6 +356,8 @@ class AugmentManager:
         Returns:
             Dict with 'affected', 'dependencies'
         """
+        self._load_augments_from_dir()
+
         to_activate: Set[str] = set()
 
         # Match patterns
