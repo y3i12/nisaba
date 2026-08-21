@@ -10,7 +10,6 @@ request metadata so the MCP side knows whose augments to serve.
 import json
 import logging
 import re
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -19,24 +18,9 @@ from nisaba.augments import get_augment_manager
 from nisaba.structured_file import StructuredFileCache
 from nisaba.workspace_files import WorkspaceFiles
 
+# Logging is centrally configured by nisaba.logging_setup.setup_logging(),
+# called at CLI startup. Just take our logger and rely on the root handler.
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-log_dir = Path(".nisaba/logs")
-log_dir.mkdir(parents=True, exist_ok=True)
-
-if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
-    file_handler = RotatingFileHandler(
-        log_dir / "proxy.log",
-        maxBytes=1 * 1024 * 1024,
-        backupCount=3,
-    )
-    file_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    )
-    file_handler.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.info("Injector logging initialized to .nisaba/logs/proxy.log")
 
 
 _UUID_RE = re.compile(

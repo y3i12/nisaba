@@ -103,6 +103,11 @@ def create_claude_wrapper_command():
             NISABA_ANTHROPIC_BASE_URL=https://relay.example.com/anthropic \\
                 nisaba claude
         """
+        # 0. Route all logging (ours + third-party) to .nisaba/logs/proxy.log
+        #    so nothing leaks into the user's claude TUI.
+        from nisaba.logging_setup import setup_logging
+        setup_logging()
+
         # 1. Find real claude binary
         real_claude = shutil.which("claude")
         if not real_claude:
@@ -175,14 +180,23 @@ def create_claude_wrapper_command():
                 click.echo(f"🔀 Proxy → {upstream}", err=True)
                 click.echo(f"🤖 Executing: {real_claude} {' '.join(claude_args)}\n", err=True)
 
+                # Now that user-facing banner is printed, redirect the
+                # parent's fd 1 (stdout) and fd 2 (stderr) to proxy.log so
+                # third-party libraries (uvicorn access log to stdout,
+                # starlette/httpx to stderr) can't leak into the terminal.
+                # We keep dups of the ORIGINAL fds for the claude subprocess
+                # so its output still reaches the user.
+                from nisaba.logging_setup import capture_std_streams_to_log
+                real_stdout_fd, real_stderr_fd = capture_std_streams_to_log()
+
                 # Run claude CLI as subprocess (blocking)
                 result = await asyncio.create_subprocess_exec(
                     real_claude,
                     *modified_claude_args,
                     env=env,
                     stdin=sys.stdin,
-                    stdout=sys.stdout,
-                    stderr=sys.stderr
+                    stdout=real_stdout_fd,
+                    stderr=real_stderr_fd,
                 )
 
                 # Wait for claude to finish
