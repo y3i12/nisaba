@@ -2,7 +2,7 @@
 Claude CLI wrapper command for nisaba.
 
 Provides a click command that wraps the real claude CLI with augments
-injection via mitmproxy.
+injection via a local HTTP reverse-proxy (pointed to by ANTHROPIC_BASE_URL).
 """
 
 import json
@@ -45,7 +45,7 @@ def create_claude_wrapper_command():
         "--proxy-port",
         type=int,
         default=None,
-        help="Port for mitmproxy (default: auto-allocate)"
+        help="Port for the local reverse-proxy (default: auto-allocate)"
     )
     @click.option(
         "--mcp-port",
@@ -56,7 +56,7 @@ def create_claude_wrapper_command():
     @click.option(
         "--debug-proxy",
         is_flag=True,
-        help="Show mitmproxy debug output"
+        help="Verbose proxy logging"
     )
     def claude_wrapper(
         claude_args: tuple,
@@ -65,15 +65,20 @@ def create_claude_wrapper_command():
         debug_proxy: bool,
     ):
         """
-        Run Claude CLI with augments injection proxy.
+        Run Claude CLI with augments injection via a local reverse-proxy.
 
-        Starts mitmproxy and the nisaba MCP server on auto-allocated ports
-        (or the explicit --proxy-port / --mcp-port if given), then launches
-        the real claude CLI with HTTPS_PROXY pointing at the proxy and the
-        nisaba MCP server injected via --mcp-config.
+        Starts a plain-HTTP reverse-proxy and the nisaba MCP server on
+        auto-allocated ports (or the explicit --proxy-port / --mcp-port if
+        given), then launches the real claude CLI with ANTHROPIC_BASE_URL
+        pointing at the proxy and the nisaba MCP server injected via
+        --mcp-config.
 
-        This means multiple `nisaba claude` instances can run in parallel
-        without port collisions, and `.mcp.json` does not need a nisaba entry.
+        Upstream is resolved from NISABA_ANTHROPIC_BASE_URL (default:
+        https://api.anthropic.com). Set this to your corporate relay when
+        applicable — nisaba does not touch the user's own ANTHROPIC_BASE_URL.
+
+        Multiple `nisaba claude` instances can run in parallel without port
+        collisions; `.mcp.json` does not need a nisaba entry.
 
         Examples:
 
@@ -86,12 +91,17 @@ def create_claude_wrapper_command():
             nisaba claude --continue
 
             \b
-            # Pin ports (useful for attaching mitmweb / debugging)
+            # Pin ports (useful for debugging)
             nisaba claude --proxy-port 1337 --mcp-port 9973
 
             \b
-            # Debug proxy (show intercepts)
+            # Verbose proxy logs
             nisaba claude --debug-proxy
+
+            \b
+            # Point upstream at a corporate relay
+            NISABA_ANTHROPIC_BASE_URL=https://relay.example.com/anthropic \\
+                nisaba claude
         """
         # 1. Find real claude binary
         real_claude = shutil.which("claude")
@@ -149,25 +159,20 @@ def create_claude_wrapper_command():
                 # Start unified server
                 await server.start()
 
-                # Setup environment for claude CLI
+                # Setup environment for claude CLI.
+                # We point the child claude at our localhost reverse-proxy
+                # via ANTHROPIC_BASE_URL. No TLS interception, no CA cert.
                 env = os.environ.copy()
-                env["HTTPS_PROXY"] = f"http://localhost:{proxy_port}"
-                env["HTTP_PROXY"] = f"http://localhost:{proxy_port}"
+                env["ANTHROPIC_BASE_URL"] = f"http://localhost:{proxy_port}"
                 env["NISABA_INSTANCE_ID"] = instance_id
 
-                # SSL certificate setup for mitmproxy
-                mitmproxy_ca = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
-                if mitmproxy_ca.exists():
-                    env["SSL_CERT_FILE"] = str(mitmproxy_ca)
-                    env["REQUESTS_CA_BUNDLE"] = str(mitmproxy_ca)
-                    env["NODE_EXTRA_CA_CERTS"] = str(mitmproxy_ca)
-                    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-                    click.echo(f"🔒 Using mitmproxy CA: {mitmproxy_ca}", err=True)
-                else:
-                    click.echo("⚠️  Warning: mitmproxy CA certificate not found", err=True)
-                    click.echo(f"   Expected at: {mitmproxy_ca}", err=True)
-                    click.echo("   Run mitmproxy once to generate certificates", err=True)
+                # Anthropic SDK requires a version header when talking HTTP —
+                # claude-code already sets one, so no default injection here.
 
+                upstream = os.environ.get(
+                    "NISABA_ANTHROPIC_BASE_URL", "https://api.anthropic.com"
+                )
+                click.echo(f"🔀 Proxy → {upstream}", err=True)
                 click.echo(f"🤖 Executing: {real_claude} {' '.join(claude_args)}\n", err=True)
 
                 # Run claude CLI as subprocess (blocking)

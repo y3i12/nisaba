@@ -1,9 +1,10 @@
 """
-Augments injection proxy using mitmproxy.
+Augments injection for Anthropic `/v1/messages` request bodies.
 
-Intercepts POST /v1/messages requests to the Anthropic API and appends
-augments content (user system prompt + active augments + compacted transcript)
-to the last system block.
+Transport-agnostic: given a raw request body, mutates it in place to
+append the user system prompt, active augments, and compacted transcript
+to the last system block. Also tracks the current session id from
+request metadata so the MCP side knows whose augments to serve.
 """
 
 import json
@@ -12,8 +13,6 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
-
-from mitmproxy import http
 
 from nisaba import session_context
 from nisaba.augments import get_augment_manager
@@ -37,7 +36,7 @@ if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
     )
     file_handler.setLevel(logging.DEBUG)
     logger.addHandler(file_handler)
-    logger.info("Proxy logging initialized to .nisaba/logs/proxy.log")
+    logger.info("Injector logging initialized to .nisaba/logs/proxy.log")
 
 
 _UUID_RE = re.compile(
@@ -48,10 +47,11 @@ _UUID_RE = re.compile(
 
 class AugmentInjector:
     """
-    mitmproxy addon that appends augments to Anthropic `/v1/messages` requests.
+    Transport-agnostic augments injector.
 
-    Injects user system prompt, active augments, and compacted transcript
-    as a suffix to the last system block of the request body.
+    process_request() takes raw request bytes and returns the (possibly
+    mutated) bytes to forward upstream. Session id extraction runs on
+    any POST with a JSON body; injection only runs on POST /v1/messages.
     """
 
     FILTERED_TOOLS = {"TodoWrite"}
@@ -73,54 +73,53 @@ class AugmentInjector:
         self._shared_system_prompt.load()
         self._shared_transcript.load()
 
-    def request(self, flow: http.HTTPFlow) -> None:
-        if not self._is_anthropic_request(flow):
-            return
-
-        logger.debug(f"Intercepted: {flow.request.method} {flow.request.path}")
+    def process_request(
+        self,
+        method: str,
+        path: str,
+        body_bytes: bytes,
+    ) -> bytes:
+        """Return the (possibly mutated) body to forward upstream."""
+        if method != "POST" or not body_bytes:
+            return body_bytes
 
         try:
-            body = json.loads(flow.request.content)
+            body = json.loads(body_bytes)
+        except json.JSONDecodeError:
+            return body_bytes
 
-            metadata = body.get('metadata', {}) or {}
-            session_id = self._extract_session_id(metadata)
-            if session_id and session_id != self.current_session_id:
-                self.current_session_id = session_id
-                session_context.set_current_session(session_id)
-                logger.info(f"Session ID set: {session_id}")
+        metadata = body.get('metadata', {}) or {}
+        session_id = self._extract_session_id(metadata)
+        if session_id and session_id != self.current_session_id:
+            self.current_session_id = session_id
+            session_context.set_current_session(session_id)
+            logger.info(f"Session ID set: {session_id}")
 
-            if not self._is_messages_endpoint(flow):
-                return
+        if not self._is_messages_endpoint(path):
+            return body_bytes
 
-            if self._inject_augments(body):
-                flow.request.content = json.dumps(body).encode('utf-8')
+        if self._inject_augments(body):
+            return json.dumps(body).encode('utf-8')
+        return body_bytes
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse request JSON: {e}")
-        except Exception as e:
-            logger.error(f"Error processing request: {e}")
-
-    def response(self, flow: http.HTTPFlow) -> None:
-        if not self._is_anthropic_request(flow):
-            return
-        if flow.response and flow.response.status_code >= 400:
-            body = flow.response.content[:500] if flow.response.content else b'empty'
+    def note_error_response(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        preview: bytes,
+    ) -> None:
+        if status_code >= 400:
             logger.error(
-                f"API error {flow.response.status_code} on "
-                f"{flow.request.method} {flow.request.path} - response: {body}"
+                f"API error {status_code} on {method} {path} - response: {preview!r}"
             )
 
-    def _is_anthropic_request(self, flow: http.HTTPFlow) -> bool:
-        return (
-            flow.request.method == "POST"
-            and "api.anthropic.com" in flow.request.pretty_host
-        )
-
-    def _is_messages_endpoint(self, flow: http.HTTPFlow) -> bool:
+    @staticmethod
+    def _is_messages_endpoint(path: str) -> bool:
         # Strip query string (e.g. ?beta=true) — only match /v1/messages exactly,
         # never /v1/messages/count_tokens or /v1/messages/batches.
-        path = flow.request.path.split("?")[0].rstrip("/")
-        return path == "/v1/messages"
+        p = path.split("?")[0].rstrip("/")
+        return p == "/v1/messages"
 
     def _extract_session_id(self, metadata: dict) -> Optional[str]:
         user_id = metadata.get('user_id')
@@ -144,7 +143,6 @@ class AugmentInjector:
         if session_id not in self._workspace_files_cache:
             self._workspace_files_cache[session_id] = WorkspaceFiles.instance(session_id)
             try:
-                # Bootstrap AugmentManager: loads pinned augments, writes augments.md
                 get_augment_manager(session_id)
             except Exception as e:
                 logger.warning(f"Failed to bootstrap AugmentManager for {session_id}: {e}")
@@ -174,9 +172,8 @@ class AugmentInjector:
                 f"\n{self._shared_transcript.load()}"
             )
 
-            # Append to the LAST system block rather than replacing or inserting.
-            # CC sends multiple system blocks (billing, CC identifier, main prompt)
-            # and the API validates their structure — replacement causes 500s.
+            # CC sends multiple system blocks and the API validates their
+            # structure — append to the last one rather than replacing.
             last_idx = len(body["system"]) - 1
             if last_idx >= 0 and "text" in body["system"][last_idx]:
                 body["system"][last_idx]["text"] += injected
